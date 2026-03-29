@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
-import { Navbar } from "@/components/navbar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const geistSans = Geist({
@@ -16,9 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Next.js v15 Starter Kit",
-  description:
-    "Next.js v15, TailwindCSS v4, shadcn/ui로 구성된 웹 개발 스타터킷",
+  title: "제조 현장 인텔리전스 플랫폼",
+  description: "철강/열연 공장 AI 에이전트 백본 시스템 — 시뮬레이터, 트레이서, RAG 에이전트",
 };
 
 export default function RootLayout({
@@ -38,10 +36,8 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {/* TooltipProvider를 최상위에 배치하여 모든 컴포넌트에서 Tooltip 사용 가능 */}
           <TooltipProvider>
-            <Navbar />
-            <main>{children}</main>
+            {children}
           </TooltipProvider>
         </ThemeProvider>
       </body>
