@@ -28,6 +28,9 @@ FastAPI + PydanticAI 기반의 실행 백엔드로 구성됩니다.
 | Pydantic | v2 |
 | Neo4j | 5.27+ (온톨로지 그래프 DB) |
 | ChromaDB | 0.6+ (Wiki RAG 벡터 DB) |
+| rank-bm25 | BM25 키워드 검색 (하이브리드 검색) |
+| sentence-transformers | Cross-encoder 리랭킹 |
+| sse-starlette | SSE 실시간 스트리밍 |
 | uvicorn | ASGI 서버 |
 | uv | 패키지 관리자 (권장) |
 
@@ -87,16 +90,21 @@ FastAPI + PydanticAI 기반의 실행 백엔드로 구성됩니다.
 │   │   ├── graph_tools.py         # Neo4j 탐색 Tool 함수
 │   │   ├── git_tools.py           # Git 이력 파싱 Tool 함수
 │   │   ├── db_tools.py            # DB 조회 Tool 함수 (Mock)
-│   │   └── wiki_tools.py          # Wiki 읽기·쓰기 Tool 함수
+│   │   └── wiki_tools.py          # Wiki 검색 Tool (하이브리드 검색 연동)
 │   ├── models/
-│   │   ├── request_models.py      # AgentRunRequest 스키마
+│   │   ├── request_models.py      # AgentRunRequest, ChatRequest 스키마
 │   │   └── response_models.py     # RichRenderer 타입과 1:1 대응 응답 스키마
-│   ├── graph/
-│   │   ├── neo4j_client.py        # Neo4j 드라이버
-│   │   └── ontology_loader.py     # 온톨로지 초기 데이터 로딩
-│   └── vector/
-│       ├── chroma_client.py       # ChromaDB 클라이언트
-│       └── wiki_indexer.py        # wiki_data → 벡터 인덱싱
+│   ├── vector/
+│   │   ├── chroma_client.py       # ChromaDB 클라이언트
+│   │   ├── wiki_indexer.py        # wiki_data → 벡터 인덱싱
+│   │   ├── hybrid_search.py       # BM25 + ChromaDB + RRF 하이브리드 검색
+│   │   └── reranker.py            # Cross-encoder 리랭킹
+│   ├── skills/
+│   │   ├── loader.py              # 스킬 마크다운 파일 로더
+│   │   └── matcher.py             # 시나리오·키워드 기반 스킬 자동 선택
+│   └── graph/
+│       ├── neo4j_client.py        # Neo4j 드라이버
+│       └── ontology_loader.py     # 온톨로지 초기 데이터 로딩
 │
 └── wiki_data/                     # Docsify 마크다운 문서
 ```
@@ -114,12 +122,18 @@ Next.js (:3000)                        Docsify (:3001)
     │  → FastAPI 프록시
     │
     ▼
-FastAPI (:8000)  POST /agent/run
-    │
-    └── Orchestrator
-            ├── S1, S2  →  Simulator Agent  → run_simulation()
-            ├── S3, S5, S7  →  Tracer Agent → traverse_graph() / parse_git_log()
-            └── S4, S6  →  RAG Agent        → search_wiki() → ChromaDB
+FastAPI (:8000)
+    ├── POST /agent/run         — 시나리오 실행 (동기)
+    ├── POST /agent/run/stream  — 시나리오 실행 (SSE 스트리밍)
+    └── POST /chat              — Wiki 기반 자유 채팅 (SSE 스트리밍)
+            │
+            └── Orchestrator
+                    ├── S1, S2  →  Simulator Agent  → run_simulation()
+                    ├── S3, S5, S7  →  Tracer Agent → traverse_graph() / parse_git_log()
+                    └── S4, S6  →  RAG Agent
+                                    └── wiki_tools.py
+                                          ├── hybrid_search() → BM25 + ChromaDB + RRF
+                                          └── rerank()        → Cross-encoder (선택)
 ```
 
 ### RichRenderer — 응답 타입별 시각화
@@ -167,15 +181,24 @@ docsify serve wiki_data --port 3001
 
 **`backend/.env`**
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...   # /chat 엔드포인트 사용 시 필요
+
+# Groq (에이전트 모델, 무료)
+GROQ_API_KEY=gsk_...
+CLAUDE_MODEL=groq:llama-3.3-70b-versatile
 
 # Neo4j AuraDB (무료 클라우드 티어)
 NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=...
+USE_NEO4J_MOCK=true   # false로 변경 시 실제 연결
 
 CHROMA_PERSIST_DIR=.chromadb
 WIKI_DATA_DIR=../wiki_data
+
+# 하이브리드 검색 설정 (신규)
+ENABLE_HYBRID_SEARCH=true   # BM25 + 벡터 검색 활성화
+ENABLE_RERANKER=false        # Cross-encoder 리랭킹 (무거운 모델)
 ```
 
 **`.env.local`** (Next.js)
@@ -202,10 +225,13 @@ pip install -e .
 
 ## API 엔드포인트
 
-| 메서드 | 경로 | 설명 |
-|---|---|---|
-| `POST` | `/agent/run` | 시나리오 실행 → RichRenderer 응답 |
-| `GET` | `/health` | 서버 상태 및 Neo4j·ChromaDB 연결 확인 |
+| 메서드 | 경로 | 설명 | 응답 방식 |
+|---|---|---|---|
+| `POST` | `/agent/run` | 시나리오 실행 → RichRenderer 응답 | JSON |
+| `POST` | `/agent/run/stream` | 시나리오 실행 (실시간 피드백) | SSE |
+| `POST` | `/chat` | Wiki 기반 자유 채팅 | SSE (토큰 스트리밍) |
+| `GET` | `/health` | 서버 상태 및 인프라 연결 확인 | JSON |
+| `GET` | `/docs` | Swagger API 문서 | HTML |
 
 ### 요청 예시
 
@@ -218,6 +244,15 @@ POST /agent/run
     "thickness": 8.5,
     "error_code": "DG320"
   }
+}
+```
+
+```json
+POST /chat
+{
+  "message": "DG320 에러가 뭔가요?",
+  "history": [],
+  "n_context_docs": 3
 }
 ```
 

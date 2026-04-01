@@ -22,6 +22,12 @@ dependencies = [
     # 유틸리티
     "python-dotenv>=1.0.0",
     "httpx>=0.28.0",
+    # 하이브리드 검색
+    "rank-bm25>=0.2.2",
+    # Cross-encoder 리랭킹 (ENABLE_RERANKER=true 시 사용)
+    "sentence-transformers>=3.0.0",
+    # SSE 스트리밍
+    "sse-starlette>=2.1.0",
 ]
 
 [build-system]

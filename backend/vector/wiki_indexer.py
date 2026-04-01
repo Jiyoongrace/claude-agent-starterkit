@@ -35,7 +35,15 @@ def index_all_wiki() -> int:
         return 0
 
     indexed = 0
+    all_documents: list[str] = []
+    all_doc_ids: list[str] = []
+    all_metadatas: list[dict] = []
+
     for md_file in wiki_dir.rglob("*.md"):
+        # 스킬 파일 제외 (_skills/ 디렉토리)
+        if "_skills" in md_file.parts:
+            continue
+
         try:
             if _FRONTMATTER_AVAILABLE:
                 post = frontmatter.load(str(md_file))
@@ -45,19 +53,31 @@ def index_all_wiki() -> int:
                 content = md_file.read_text(encoding="utf-8")
                 meta = {}
 
+            metadata = {
+                "source": str(md_file.relative_to(wiki_dir)),
+                "scenario": str(meta.get("연관_시나리오", [])),
+                "agent": str(meta.get("담당_에이전트", "")),
+                "tags": str(meta.get("비즈니스_태그", [])),
+            }
             collection.upsert(  # type: ignore
                 ids=[str(md_file)],
                 documents=[content],
-                metadatas=[{
-                    "source": str(md_file.relative_to(wiki_dir)),
-                    "scenario": str(meta.get("연관_시나리오", [])),
-                    "agent": str(meta.get("담당_에이전트", "")),
-                    "tags": str(meta.get("비즈니스_태그", [])),
-                }],
+                metadatas=[metadata],
             )
+            all_documents.append(content)
+            all_doc_ids.append(str(md_file))
+            all_metadatas.append(metadata)
             indexed += 1
         except Exception as e:
             print(f"[Wiki Indexer] 파일 인덱싱 실패 ({md_file.name}): {e}")
+
+    # BM25 인덱스 동시 구축
+    if all_documents:
+        try:
+            from vector.hybrid_search import build_bm25_index
+            build_bm25_index(all_documents, all_doc_ids, all_metadatas)
+        except Exception as e:
+            print(f"[Wiki Indexer] BM25 인덱스 구축 실패: {e}")
 
     return indexed
 

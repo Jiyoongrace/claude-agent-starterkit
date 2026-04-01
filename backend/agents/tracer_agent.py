@@ -12,12 +12,7 @@ from models.response_models import GitTimelineResult, GraphPathResult, MsaDiffRe
 
 _MODEL = os.getenv("CLAUDE_MODEL", "anthropic:claude-sonnet-4-20250514")
 
-# ─── S3: Slab Job 비정상 종료 원인 추적 ─────────────────────────────────────────
-tracer_s3 = Agent(
-    model=_MODEL,
-    output_type=GitTimelineResult,
-    output_retries=3,
-    system_prompt="""
+_S3_FALLBACK = """
 당신은 Git 이력 분석 전문 AI 에이전트입니다.
 Slab 설계 Job 비정상 종료의 원인이 된 커밋을 탐지합니다.
 
@@ -26,7 +21,49 @@ Slab 설계 Job 비정상 종료의 원인이 된 커밋을 탐지합니다.
 Tool 없이 커밋 이력을 가정하는 것을 금지합니다.
 
 출력 형식: GitTimelineResult (type="git_timeline")
-""",
+"""
+
+_S5_FALLBACK = """
+당신은 시스템 영향도 분석 전문 AI 에이전트입니다.
+신규 공장 설비 추가 시 영향받는 소스·기준·서비스를 그래프로 탐색합니다.
+
+반드시 traverse_factory_impact Tool을 호출하여 영향받는 컴포넌트를 탐색하세요.
+노드 타입: target(보라), db(파랑), service(초록), code(주황)으로 분류하세요.
+Tool 없이 임의로 그래프를 구성하는 것을 금지합니다.
+
+출력 형식: GraphPathResult (type="graph_path")
+"""
+
+_S7_FALLBACK = """
+당신은 MSA 데이터 정합성 분석 전문 AI 에이전트입니다.
+두 서비스 DB 간 대기량 불일치를 탐지합니다.
+
+반드시 get_order_data와 get_production_data Tool을 모두 호출하여
+두 테이블의 데이터를 비교하고 불일치 컬럼(diff_keys)을 식별하세요.
+Tool 없이 데이터를 가정하는 것을 금지합니다.
+
+출력 형식: MsaDiffResult (type="msa_diff")
+"""
+
+
+def _build_system_prompt(scenario_id: str, fallback: str) -> str:
+    """스킬 파일 로딩, 실패 시 기존 하드코딩 프롬프트로 폴백."""
+    try:
+        from skills.matcher import match_skill
+        skill_content = match_skill(query="", scenario_id=scenario_id)
+        if skill_content:
+            return skill_content
+    except Exception:
+        pass
+    return fallback
+
+
+# ─── S3: Slab Job 비정상 종료 원인 추적 ─────────────────────────────────────────
+tracer_s3 = Agent(
+    model=_MODEL,
+    output_type=GitTimelineResult,
+    output_retries=3,
+    system_prompt=_build_system_prompt("S3", _S3_FALLBACK),
 )
 
 
@@ -49,16 +86,7 @@ tracer_s5 = Agent(
     model=_MODEL,
     output_type=GraphPathResult,
     output_retries=3,
-    system_prompt="""
-당신은 시스템 영향도 분석 전문 AI 에이전트입니다.
-신규 공장 설비 추가 시 영향받는 소스·기준·서비스를 그래프로 탐색합니다.
-
-반드시 traverse_factory_impact Tool을 호출하여 영향받는 컴포넌트를 탐색하세요.
-노드 타입: target(보라), db(파랑), service(초록), code(주황)으로 분류하세요.
-Tool 없이 임의로 그래프를 구성하는 것을 금지합니다.
-
-출력 형식: GraphPathResult (type="graph_path")
-""",
+    system_prompt=_build_system_prompt("S5", _S5_FALLBACK),
 )
 
 
@@ -80,16 +108,7 @@ tracer_s7 = Agent(
     model=_MODEL,
     output_type=MsaDiffResult,
     output_retries=3,
-    system_prompt="""
-당신은 MSA 데이터 정합성 분석 전문 AI 에이전트입니다.
-두 서비스 DB 간 대기량 불일치를 탐지합니다.
-
-반드시 get_order_data와 get_production_data Tool을 모두 호출하여
-두 테이블의 데이터를 비교하고 불일치 컬럼(diff_keys)을 식별하세요.
-Tool 없이 데이터를 가정하는 것을 금지합니다.
-
-출력 형식: MsaDiffResult (type="msa_diff")
-""",
+    system_prompt=_build_system_prompt("S7", _S7_FALLBACK),
 )
 
 

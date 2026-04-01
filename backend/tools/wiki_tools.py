@@ -1,9 +1,13 @@
 """
 Wiki 검색 Tool 함수 — S4, S6 담당 (RAG).
 
-ChromaDB 연결 시: 벡터 유사도 검색
-Mock 모드:        하드코딩 텍스트 반환
+검색 전략 (환경변수로 제어):
+  ENABLE_HYBRID_SEARCH=true  → BM25 + ChromaDB 벡터 + RRF 병합 검색
+  ENABLE_HYBRID_SEARCH=false → ChromaDB 벡터 검색만 (기본값)
+  ENABLE_RERANKER=true       → Cross-encoder 리랭킹 추가 적용
+Mock 모드: ChromaDB/BM25 결과 없을 때 하드코딩 텍스트 반환
 """
+import os
 from vector.wiki_indexer import search_wiki
 
 # ─── Mock 데이터 (mock-agents.ts S4, S6 데이터와 동일) ──────────────────────
@@ -43,15 +47,38 @@ _MOCK_RUNBOOK_RESULT = {
 }
 
 
+def _get_search_results(query: str, n_results: int) -> list[dict]:
+    """환경변수에 따라 하이브리드 검색 또는 벡터 검색을 실행."""
+    use_hybrid = os.getenv("ENABLE_HYBRID_SEARCH", "false").lower() == "true"
+
+    if use_hybrid:
+        try:
+            from vector.hybrid_search import hybrid_search
+            results = hybrid_search(query, n_results=n_results * 2)
+        except Exception:
+            results = search_wiki(query, n_results=n_results)
+    else:
+        results = search_wiki(query, n_results=n_results)
+
+    if results and os.getenv("ENABLE_RERANKER", "false").lower() == "true":
+        try:
+            from vector.reranker import rerank
+            results = rerank(query, results, top_k=n_results)
+        except Exception:
+            results = results[:n_results]
+
+    return results[:n_results]
+
+
 async def search_term(query: str) -> dict:
     """
     비즈니스 용어 또는 에러코드로 Wiki 문서를 검색합니다.
 
-    ChromaDB 연결 시: 벡터 유사도 검색
-    Mock 모드:        키워드 매칭 후 하드코딩 결과 반환
+    ENABLE_HYBRID_SEARCH=true: BM25 + 벡터 하이브리드 검색
+    ENABLE_HYBRID_SEARCH=false: ChromaDB 벡터 검색 (기본)
+    Mock 모드: 키워드 매칭 후 하드코딩 결과 반환
     """
-    # ChromaDB 벡터 검색 시도
-    results = search_wiki(query, n_results=2)
+    results = _get_search_results(query, n_results=3)
     if results:
         combined_content = "\n\n---\n\n".join(r["content"] for r in results)
         return {"content": combined_content, "mappings": []}
@@ -80,8 +107,8 @@ async def get_runbook(
     ChromaDB 연결 시: IRMS 런북 문서를 검색하여 동적 생성
     Mock 모드:        하드코딩 결재 초안 반환
     """
-    # ChromaDB 런북 검색 시도
-    results = search_wiki("IRMS 권한 신청", n_results=1)
+    # 런북 검색 (하이브리드 또는 벡터)
+    results = _get_search_results("IRMS 권한 신청", n_results=1)
     if results:
         runbook_content = results[0]["content"]
         content = (

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Play, Loader2 } from "lucide-react"
+import { Play, Loader2, Cpu, Search, GitBranch, BookOpen } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { SCENARIOS, AGENT_BADGE_COLORS } from "@/lib/scenarios"
 import { ScenarioId } from "@/lib/scenarios"
@@ -12,27 +12,28 @@ interface Props {
   scenarioId: ScenarioId
 }
 
+// 에이전트별 실행 단계 메시지
+const AGENT_STEPS: Record<string, string[]> = {
+  "시뮬레이터": ["파라미터 범위 설정 중...", "시뮬레이션 실행 중...", "최적 조합 계산 중..."],
+  "트레이서": ["데이터 소스 연결 중...", "이력 탐색 중...", "원인 경로 추적 중..."],
+  "RAG": ["Wiki 문서 검색 중...", "관련 문서 순위 계산 중...", "답변 생성 중..."],
+}
+
 export function ScenarioPanel({ scenarioId }: Props) {
   const { setMode } = useWorkspace()
   const [loading, setLoading] = useState(false)
+  const [thinkingMsg, setThinkingMsg] = useState<string | null>(null)
+  const [stepIndex, setStepIndex] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const scenario = SCENARIOS.find(s => s.id === scenarioId)!
 
-  // 각 시나리오별 폼 파라미터 상태
   const [params, setParams] = useState<Record<string, string>>({
-    // S1
     error_code: "DG320", width: "1200", thickness: "8.5",
-    // S2
     edging_value: "",
-    // S3
     job_id: "JOB-2025-0325", date_from: "2025-03-20", date_to: "2025-03-26",
-    // S4
     term: "",
-    // S5
     factory_name: "HOT_MILL_3", systems: "",
-    // S6
     requester: "", screen_id: "SCR_QUALITY_MGR", permission_level: "READ_WRITE",
-    // S7
     service_a: "ORDER_DB", service_b: "PROD_DB",
   })
 
@@ -43,24 +44,80 @@ export function ScenarioPanel({ scenarioId }: Props) {
   async function handleRun() {
     setLoading(true)
     setError(null)
+    setThinkingMsg(null)
+    setStepIndex(0)
+
+    const steps = AGENT_STEPS[scenario.agent] ?? ["분석 중..."]
+
+    // 단계 메시지 순환 (SSE thinking 이벤트 수신 전 fallback)
+    const stepTimer = setInterval(() => {
+      setStepIndex(i => {
+        const next = i + 1
+        if (next < steps.length) return next
+        return i
+      })
+    }, 1800)
+
     try {
-      const res = await fetch("/api/agent/run", {
+      const res = await fetch("/api/agent/run/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scenario_id: scenarioId, params }),
       })
-      const data = await res.json()
-      if (!res.ok) {
-        setError(data.detail ?? `오류 발생 (${res.status})`)
+
+      if (!res.ok || !res.body) {
+        setError("서버에 연결할 수 없습니다.")
         return
       }
-      setMode({ type: "result", scenarioId, result: data as AgentResponse })
-    } catch (e) {
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const blocks = buffer.split("\n\n")
+        buffer = blocks.pop() ?? ""
+
+        for (const block of blocks) {
+          const eventLine = block.split("\n").find(l => l.startsWith("event:"))
+          const dataLine  = block.split("\n").find(l => l.startsWith("data:"))
+          if (!dataLine) continue
+
+          const event = eventLine?.replace("event:", "").trim()
+          const rawData = dataLine.replace("data:", "").trim()
+
+          try {
+            const data = JSON.parse(rawData)
+
+            if (event === "thinking") {
+              setThinkingMsg(data.message ?? null)
+            } else if (event === "result") {
+              clearInterval(stepTimer)
+              setMode({ type: "result", scenarioId, result: data as AgentResponse })
+              return
+            } else if (event === "error") {
+              setError(data.detail ?? "에이전트 오류가 발생했습니다.")
+              return
+            }
+          } catch {
+            // JSON 파싱 실패 무시
+          }
+        }
+      }
+    } catch {
       setError("서버에 연결할 수 없습니다.")
     } finally {
+      clearInterval(stepTimer)
       setLoading(false)
+      setThinkingMsg(null)
     }
   }
+
+  const agentSteps = AGENT_STEPS[scenario.agent] ?? ["분석 중..."]
 
   return (
     <div className="flex flex-col h-full">
@@ -136,6 +193,9 @@ export function ScenarioPanel({ scenarioId }: Props) {
             <Field label="비즈니스 용어 검색">
               <input value={params.term} onChange={e => set("term", e.target.value)}
                 className="input-field" placeholder="예: 단중, DG320, 타겟 단중" />
+              <p className="text-xs text-muted-foreground mt-1">
+                하이브리드 검색(BM25 + 벡터) 적용 — Wiki 문서에서 정밀 탐색합니다
+              </p>
             </Field>
           )}
 
@@ -194,22 +254,66 @@ export function ScenarioPanel({ scenarioId }: Props) {
         </div>
       </div>
 
-      {/* 에러 메시지 */}
+      {/* 에러 */}
       {error && (
         <div className="shrink-0 mx-6 mb-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
-      {/* 실행 버튼 */}
-      <div className="shrink-0 border-t px-6 py-4">
+      {/* 실행 버튼 + 스트리밍 상태 */}
+      <div className="shrink-0 border-t px-6 py-4 space-y-3">
+        {loading && (
+          <div className="rounded-lg border bg-muted/40 px-4 py-3 space-y-2">
+            {/* 현재 단계 메시지 */}
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+              <span className="text-foreground">
+                {thinkingMsg ?? agentSteps[Math.min(stepIndex, agentSteps.length - 1)]}
+              </span>
+            </div>
+
+            {/* 단계 프로그레스 점 */}
+            <div className="flex items-center gap-1.5 pl-6">
+              {agentSteps.map((step, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <div className={cn(
+                    "h-1.5 w-1.5 rounded-full transition-colors duration-500",
+                    i <= (thinkingMsg ? agentSteps.length - 1 : stepIndex)
+                      ? "bg-primary" : "bg-muted-foreground/30"
+                  )} />
+                  {i < agentSteps.length - 1 && (
+                    <div className="h-px w-4 bg-muted-foreground/20" />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* 에이전트 타입 정보 */}
+            <div className="flex items-center gap-3 pl-6 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1">
+                {scenario.agent === "시뮬레이터" && <Cpu className="h-3 w-3" />}
+                {scenario.agent === "트레이서"   && <GitBranch className="h-3 w-3" />}
+                {scenario.agent === "RAG"         && <Search className="h-3 w-3" />}
+                {scenario.agent} 에이전트 실행 중
+              </span>
+              {(scenarioId === "S4" || scenarioId === "S6") && (
+                <span className="flex items-center gap-1">
+                  <BookOpen className="h-3 w-3" />
+                  하이브리드 검색
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <button
           onClick={handleRun}
           disabled={loading}
           className="flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60 transition-colors"
         >
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-          {loading ? "분석 중..." : "분석 실행"}
+          {loading ? "AI 분석 중..." : "분석 실행"}
         </button>
       </div>
     </div>

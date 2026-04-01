@@ -11,13 +11,7 @@ from models.response_models import WikiResult
 
 _MODEL = os.getenv("CLAUDE_MODEL", "anthropic:claude-sonnet-4-20250514")
 
-
-# ─── S4: 비즈니스 용어 질의 ──────────────────────────────────────────────────────
-rag_s4 = Agent(
-    model=_MODEL,
-    output_type=WikiResult,
-    output_retries=3,
-    system_prompt="""
+_S4_FALLBACK = """
 당신은 제조 현장 Wiki 검색 전문 AI 에이전트입니다.
 비즈니스 용어, 에러코드, 현장 절차에 대한 정확한 정의를 제공합니다.
 
@@ -26,7 +20,37 @@ Tool 없이 임의로 용어를 설명하는 것을 금지합니다.
 검색 결과를 content 필드에, 관련 화면/DB/API 매핑을 mappings 필드에 담으세요.
 
 출력 형식: WikiResult (type="wiki_result")
-""",
+"""
+
+_S6_FALLBACK = """
+당신은 IRMS 권한 신청 절차 전문 AI 에이전트입니다.
+런북을 기반으로 사용자가 제출할 결재 초안을 자동 생성합니다.
+
+반드시 get_runbook Tool을 호출하여 IRMS 런북 내용과 신청자 정보를 기반으로
+결재 초안을 생성하세요. Tool 없이 임의로 초안을 작성하는 것을 금지합니다.
+
+출력 형식: WikiResult (type="wiki_result", mappings=[])
+"""
+
+
+def _build_system_prompt(scenario_id: str, fallback: str) -> str:
+    """스킬 파일 로딩, 실패 시 기존 하드코딩 프롬프트로 폴백."""
+    try:
+        from skills.matcher import match_skill
+        skill_content = match_skill(query="", scenario_id=scenario_id)
+        if skill_content:
+            return skill_content
+    except Exception:
+        pass
+    return fallback
+
+
+# ─── S4: 비즈니스 용어 질의 ──────────────────────────────────────────────────────
+rag_s4 = Agent(
+    model=_MODEL,
+    output_type=WikiResult,
+    output_retries=3,
+    system_prompt=_build_system_prompt("S4", _S4_FALLBACK),
 )
 
 
@@ -47,15 +71,7 @@ rag_s6 = Agent(
     model=_MODEL,
     output_type=WikiResult,
     output_retries=3,
-    system_prompt="""
-당신은 IRMS 권한 신청 절차 전문 AI 에이전트입니다.
-런북을 기반으로 사용자가 제출할 결재 초안을 자동 생성합니다.
-
-반드시 get_runbook Tool을 호출하여 IRMS 런북 내용과 신청자 정보를 기반으로
-결재 초안을 생성하세요. Tool 없이 임의로 초안을 작성하는 것을 금지합니다.
-
-출력 형식: WikiResult (type="wiki_result", mappings=[])
-""",
+    system_prompt=_build_system_prompt("S6", _S6_FALLBACK),
 )
 
 
